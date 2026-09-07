@@ -1,0 +1,20 @@
+[project]
+name = "forklab-cli"
+version = "0.1.0"
+description = "ForkLab command line: run, fork, compare, verify, replay"
+requires-python = ">=3.12"
+dependencies = ["forklab-domain", "forklab-evaluation"]
+
+[project.scripts]
+forklab = "forklab_cli.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["forklab_cli"]
+
+[tool.uv.sources]
+forklab-domain = { workspace = true }
+forklab-evaluation = { workspace = true }
