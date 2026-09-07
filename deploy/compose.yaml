@@ -1,0 +1,47 @@
+name: forklab
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: forklab
+      POSTGRES_DB: forklab
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - forklab-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U forklab -d forklab"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://forklab:${POSTGRES_PASSWORD}@db:5432/forklab
+      # The standalone worker owns execution here, so the API does not run one.
+      FORKLAB_START_WORKER: "0"
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: ["uv", "run", "--no-dev", "forklab-worker"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://forklab:${POSTGRES_PASSWORD}@db:5432/forklab
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  forklab-db:

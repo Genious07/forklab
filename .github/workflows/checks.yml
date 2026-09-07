@@ -1,0 +1,70 @@
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --frozen
+
+      - name: Lint
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Tests
+        run: uv run pytest tests/ -p no:warnings
+
+      # The product's central claim is that its numbers are trustworthy, so CI
+      # checks the hand solvable case, the invariants, and reproducibility
+      # directly rather than only running the unit tests.
+      - name: Verify simulator correctness
+        run: uv run forklab verify
+
+      - name: Walkthrough runs end to end
+        run: uv run forklab demo
+
+      - name: Decision manifest replays exactly
+        run: |
+          uv run forklab compare --replications 10 --manifest /tmp/decision.json
+          uv run forklab replay /tmp/decision.json
+
+  web:
+    name: Web checks
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install
+        run: npm install
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build
+        run: npm run build
