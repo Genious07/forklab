@@ -35,8 +35,9 @@ from forklab_domain import (
 )
 from forklab_eval import outcomes as order_outcomes
 from forklab_eval.compare import ComparisonReport
-from pydantic import BaseModel, Field
-from sqlalchemy import select
+from pydantic import BaseModel, Field, ValidationError
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 
 from .db import EventLogRow, ExperimentRow, ReplicationRow, ScenarioRow, init_db, session_scope
 from .jobs import execute, new_worker_id
@@ -105,11 +106,11 @@ class CreateExperiment(BaseModel):
     baseline_scenario_id: str
     candidate_scenario_id: str | None = None
     replications: int = Field(default=30, ge=1, le=200)
-    idempotency_key: str | None = None
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class ForkRequest(BaseModel):
-    label: str
+    label: str = Field(min_length=1, max_length=200)
     policy: PolicyIn
 
 
@@ -164,7 +165,14 @@ def _store_scenario(
         policy_digest=scenario.policy.digest(),
         payload=scenario.model_dump(mode="json"),
     )
-    session.merge(row)
+    existing = session.get(ScenarioRow, row.id)
+    if existing is not None:
+        if existing.organization_id == org and existing.payload == row.payload:
+            return existing
+        raise HTTPException(
+            status_code=409, detail="scenario snapshots are immutable; create a fork"
+        )
+    session.add(row)
     return row
 
 
@@ -180,6 +188,16 @@ def _owned_experiment(session, org: str, experiment_id: str) -> ExperimentRow:
     if row is None or row.organization_id != org:
         raise HTTPException(status_code=404, detail="experiment not found")
     return row
+
+
+async def _read_upload(upload: UploadFile) -> str:
+    content = await upload.read(2 * 1024 * 1024 + 1)
+    if len(content) > 2 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Each CSV must be at most 2 MiB")
+    try:
+        return content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=422, detail="Save the CSV as UTF-8 and try again") from exc
 
 
 # --------------------------------------------------------------- background
@@ -205,6 +223,8 @@ class InProcessWorker:
 
     def stop(self) -> None:
         self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
 
     def _loop(self) -> None:
         from .jobs import claim_next
@@ -220,13 +240,12 @@ class InProcessWorker:
                 self._stop.wait(1.0)
 
 
-worker = InProcessWorker()
-
-
 # ------------------------------------------------------------------- the app
 
 
 def create_app(start_worker: bool = True) -> FastAPI:
+    worker = InProcessWorker()
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         init_db()
@@ -280,7 +299,9 @@ def create_app(start_worker: bool = True) -> FastAPI:
     def reset_demo(
         org: OrgDep, orders: int = Query(default=650, ge=10, le=5000)
     ) -> ScenarioSummary:
-        scenario = demo_scenario(order_count=orders)
+        scenario = demo_scenario(order_count=orders).model_copy(
+            update={"scenario_id": f"demo-{uuid.uuid4().hex[:12]}"}
+        )
         with session_scope() as session:
             row = _store_scenario(session, org, scenario)
             session.flush()
@@ -314,17 +335,19 @@ def create_app(start_worker: bool = True) -> FastAPI:
         inventory_file: UploadFile = File(...),
         replenishments_file: UploadFile | None = File(default=None),
     ) -> dict[str, Any]:
-        orders_text = (await orders_file.read()).decode("utf-8", errors="replace")
-        inventory_text = (await inventory_file.read()).decode("utf-8", errors="replace")
+        orders_text = await _read_upload(orders_file)
+        inventory_text = await _read_upload(inventory_file)
 
         orders, order_issues = read_orders(orders_text)
         inventory, inventory_issues = read_inventory(inventory_text)
         replenishments: list = []
         replen_issues: list = []
         if replenishments_file is not None:
-            text = (await replenishments_file.read()).decode("utf-8", errors="replace")
+            text = await _read_upload(replenishments_file)
             replenishments, replen_issues = read_replenishments(text)
 
+        if len(orders) > 5000:
+            raise HTTPException(status_code=413, detail="Limit imports to 5,000 orders per study")
         report = build_report(orders, inventory, order_issues + inventory_issues + replen_issues)
         payload: dict[str, Any] = {
             "accepted_rows": report.accepted_rows,
@@ -339,13 +362,26 @@ def create_app(start_worker: bool = True) -> FastAPI:
             )
             return payload
 
-        scenario = Scenario(
-            scenario_id=f"import-{uuid.uuid4().hex[:8]}",
-            label=label,
-            orders=orders,
-            inventory=inventory,
-            replenishments=replenishments,
-        )
+        try:
+            from forklab_domain.models import FacilityModel
+
+            scenario = Scenario(
+                scenario_id=f"import-{uuid.uuid4().hex[:12]}",
+                label=label,
+                orders=orders,
+                inventory=inventory,
+                replenishments=replenishments,
+                facility=FacilityModel(
+                    provenance={
+                        "shift": "estimated",
+                        "processing_times": "estimated",
+                        "pickers": "estimated",
+                        "packing_stations": "estimated",
+                    }
+                ),
+            )
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()[0]["msg"]) from exc
         with session_scope() as session:
             _store_scenario(session, org, scenario)
         payload["scenario_id"] = scenario.scenario_id
@@ -357,7 +393,7 @@ def create_app(start_worker: bool = True) -> FastAPI:
         """Return only the rejected rows, with the reason appended."""
         from forklab_domain.csv_io import ORDER_COLUMNS
 
-        text = (await orders_file.read()).decode("utf-8", errors="replace")
+        text = await _read_upload(orders_file)
         orders, issues = read_orders(text)
         report = build_report(orders, [], issues)
         return report.repair_csv(ORDER_COLUMNS)
@@ -366,34 +402,69 @@ def create_app(start_worker: bool = True) -> FastAPI:
 
     @app.post(f"{API_PREFIX}/experiments", response_model=ExperimentSummary)
     def create_experiment(body: CreateExperiment, org: OrgDep) -> ExperimentSummary:
-        with session_scope() as session:
-            _owned_scenario(session, org, body.baseline_scenario_id)
-            if body.candidate_scenario_id:
-                _owned_scenario(session, org, body.candidate_scenario_id)
-
-            if body.idempotency_key:
-                existing = session.scalars(
+        def existing_request(session):
+            existing = (
+                session.scalars(
                     select(ExperimentRow).where(
                         ExperimentRow.organization_id == org,
                         ExperimentRow.idempotency_key == body.idempotency_key,
                     )
                 ).first()
-                if existing is not None:
-                    return _experiment_summary(existing)
-
-            row = ExperimentRow(
-                id=f"exp-{uuid.uuid4().hex[:10]}",
-                organization_id=org,
-                baseline_scenario_id=body.baseline_scenario_id,
-                candidate_scenario_id=body.candidate_scenario_id,
-                replications=body.replications,
-                idempotency_key=body.idempotency_key,
-                state="queued",
-                stage="queued",
+                if body.idempotency_key
+                else None
             )
-            session.add(row)
-            session.flush()
-            return _experiment_summary(row)
+            if existing is not None:
+                if (
+                    existing.baseline_scenario_id,
+                    existing.candidate_scenario_id,
+                    existing.replications,
+                ) != (
+                    body.baseline_scenario_id,
+                    body.candidate_scenario_id,
+                    body.replications,
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="idempotency key already used for a different request",
+                    )
+                return _experiment_summary(existing)
+            return None
+
+        try:
+            with session_scope() as session:
+                baseline = _owned_scenario(session, org, body.baseline_scenario_id)
+                if body.candidate_scenario_id:
+                    candidate = _owned_scenario(session, org, body.candidate_scenario_id)
+                    exclude = {"scenario_id", "label", "policy"}
+                    if Scenario.model_validate(baseline.payload).model_dump(
+                        exclude=exclude
+                    ) != Scenario.model_validate(candidate.payload).model_dump(exclude=exclude):
+                        raise HTTPException(
+                            status_code=422,
+                            detail="Compare policies on the same workload and facility",
+                        )
+                existing = existing_request(session)
+                if existing is not None:
+                    return existing
+                row = ExperimentRow(
+                    id=f"exp-{uuid.uuid4().hex[:12]}",
+                    organization_id=org,
+                    baseline_scenario_id=body.baseline_scenario_id,
+                    candidate_scenario_id=body.candidate_scenario_id,
+                    replications=body.replications,
+                    idempotency_key=body.idempotency_key,
+                    state="queued",
+                    stage="queued",
+                )
+                session.add(row)
+                session.flush()
+                return _experiment_summary(row)
+        except IntegrityError:
+            with session_scope() as session:
+                existing = existing_request(session)
+                if existing is not None:
+                    return existing
+            raise
 
     @app.get(f"{API_PREFIX}/experiments", response_model=list[ExperimentSummary])
     def list_experiments(org: OrgDep) -> list[ExperimentSummary]:
@@ -419,13 +490,24 @@ def create_app(start_worker: bool = True) -> FastAPI:
             row = _owned_experiment(session, org, experiment_id)
             if row.state in ("succeeded", "failed", "cancelled"):
                 return _experiment_summary(row)
-            row.cancel_requested = 1
-            session.flush()
+            session.execute(
+                update(ExperimentRow)
+                .where(
+                    ExperimentRow.id == experiment_id,
+                    ExperimentRow.organization_id == org,
+                    ExperimentRow.state.in_(("queued", "running")),
+                )
+                .values(cancel_requested=1)
+                .execution_options(synchronize_session=False)
+            )
+            session.refresh(row)
             return _experiment_summary(row)
 
     @app.get(f"{API_PREFIX}/experiments/{{experiment_id}}/stream")
     async def stream_experiment(experiment_id: str, org: OrgDep) -> StreamingResponse:
-        """Server sent events for progress, with the cursor carried in each frame."""
+        """Progress snapshots; reconnecting reads the durable record."""
+        with session_scope() as session:
+            _owned_experiment(session, org, experiment_id)
 
         async def generator():
             last = None
@@ -477,6 +559,7 @@ def create_app(start_worker: bool = True) -> FastAPI:
         arm: Literal["baseline", "candidate"] = "baseline",
         only_late: bool = False,
         limit: int = Query(default=200, ge=1, le=2000),
+        offset: int = Query(default=0, ge=0),
     ) -> list[dict[str, Any]]:
         """Per order outcomes for the stored replication, for the explanation view."""
         with session_scope() as session:
@@ -509,6 +592,10 @@ def create_app(start_worker: bool = True) -> FastAPI:
             events=[Event.model_validate(e) for e in log.events],
             overtime_minutes=0.0,
         )
+        blocked_times: dict[str, list[float]] = {}
+        for event in log.events:
+            if event["event_type"] == "blocked_no_stock":
+                blocked_times.setdefault(event["order_id"], []).append(event["minute"])
         rows = order_outcomes(scenario, result)
         if only_late:
             rows = [row for row in rows if row.is_late]
@@ -518,8 +605,9 @@ def create_app(start_worker: bool = True) -> FastAPI:
                 "is_late": row.is_late,
                 "wait_minutes": row.wait_minutes,
                 "cycle_minutes": row.cycle_minutes,
+                "blocked_minutes": blocked_times.get(row.order_id, []),
             }
-            for row in rows[:limit]
+            for row in rows[offset : offset + limit]
         ]
 
     @app.get(f"{API_PREFIX}/experiments/{{experiment_id}}/orders/{{order_id}}")
@@ -570,6 +658,8 @@ def create_app(start_worker: bool = True) -> FastAPI:
     bundle = Path(__file__).resolve().parents[3] / "apps" / "web" / "dist"
     if bundle.is_dir():
         app.mount("/assets", StaticFiles(directory=bundle / "assets"), name="assets")
+        if (bundle / "brand").is_dir():
+            app.mount("/brand", StaticFiles(directory=bundle / "brand"), name="brand")
 
         @app.get("/", include_in_schema=False)
         def index() -> FileResponse:

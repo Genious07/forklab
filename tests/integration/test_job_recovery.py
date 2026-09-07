@@ -150,3 +150,70 @@ def test_a_job_that_exhausts_its_attempts_is_marked_failed(db):
     assert row.state == "failed"
     assert "attempts" in (row.error or "")
     assert row.report is None
+
+
+def test_stale_worker_cannot_heartbeat_finish_or_write(db):
+    from forklab_api.db import ExperimentRow, ReplicationRow, session_scope, utcnow
+    from forklab_api.jobs import _finish, claim_next, execute, heartbeat
+
+    job = seed_experiment(db)
+    claim_next("old")
+    with session_scope() as session:
+        session.get(ExperimentRow, job).lease_expires_at = utcnow() - timedelta(seconds=1)
+    assert claim_next("new") == job
+    assert heartbeat(job, "old", "stale", 9) is False
+    assert _finish(job, "old", "succeeded", {}, None) == "lease_lost"
+    assert execute(job, "old") == "lease_lost"
+    with session_scope() as session:
+        assert session.query(ReplicationRow).count() == 0
+        assert session.get(ExperimentRow, job).worker_id == "new"
+    assert execute(job, "new") == "succeeded"
+
+
+def test_report_uses_checkpoints_without_simulating_twice(db, monkeypatch):
+    import forklab_api.jobs as jobs
+
+    job = seed_experiment(db, replications=3)
+    real = jobs.simulate
+    calls = []
+
+    def counted(scenario, seed):
+        calls.append((scenario.scenario_id, seed))
+        return real(scenario, seed)
+
+    monkeypatch.setattr(jobs, "simulate", counted)
+    jobs.claim_next("worker")
+    assert jobs.execute(job, "worker") == "succeeded"
+    assert len(calls) == 6
+
+
+def test_invariants_are_checked_after_first_seed(db, monkeypatch):
+    import forklab_api.jobs as jobs
+
+    job = seed_experiment(db, replications=3)
+    real = jobs.check_run
+    monkeypatch.setattr(
+        jobs,
+        "check_run",
+        lambda scenario, run: ["second seed failure"] if run.seed == 2 else real(scenario, run),
+    )
+    jobs.claim_next("worker")
+    assert jobs.execute(job, "worker") == "failed"
+
+
+def test_cancellation_during_last_simulation_wins(db, monkeypatch):
+    import forklab_api.jobs as jobs
+    from forklab_api.db import ExperimentRow, session_scope
+
+    job = seed_experiment(db, replications=1, with_candidate=False)
+    real = jobs.simulate
+
+    def cancel_after_run(scenario, seed):
+        result = real(scenario, seed)
+        with session_scope() as session:
+            session.get(ExperimentRow, job).cancel_requested = 1
+        return result
+
+    monkeypatch.setattr(jobs, "simulate", cancel_after_run)
+    jobs.claim_next("worker")
+    assert jobs.execute(job, "worker") == "cancelled"

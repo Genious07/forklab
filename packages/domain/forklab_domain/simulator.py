@@ -24,7 +24,7 @@ from .events import Event, EventType, RunResult
 from .models import OrderLine, PolicyVersion, Scenario
 from .policies import compile_policy
 
-ENGINE_VERSION = "forklab-sim-0.1.0"
+ENGINE_VERSION = "forklab-sim-0.1.1"
 
 
 def _triangular_factors(scenario: Scenario, seed: int) -> dict[tuple[str, str], float]:
@@ -135,6 +135,8 @@ class _Simulation:
 
     def assign(self) -> None:
         """Run assignment to a fixed point. Safe to call after any change."""
+        if self.env.now < self.scenario.facility.shift.shift_start_minute:
+            return
         progressed = True
         while progressed:
             progressed = False
@@ -155,6 +157,14 @@ class _Simulation:
                 if order is not None:
                     self.pick_queue.remove(order)
                     self.idle_pickers -= 1
+                    # Reserve synchronously before another assignment observes stock.
+                    self.stock[order.sku] -= order.quantity
+                    self.log(
+                        order.order_id,
+                        EventType.stock_reserved,
+                        sku=order.sku,
+                        quantity=order.quantity,
+                    )
                     self.env.process(self.run_pick(order))
                     progressed = True
                     continue
@@ -207,8 +217,6 @@ class _Simulation:
 
     def run_pick(self, order: OrderLine):
         start = self.env.now
-        self.stock[order.sku] -= order.quantity
-        self.log(order.order_id, EventType.stock_reserved, sku=order.sku, quantity=order.quantity)
         self.log(order.order_id, EventType.pick_start, resource_id="picker")
         yield self.env.timeout(self.pick_minutes(order))
         self.log(order.order_id, EventType.pick_end, resource_id="picker")
@@ -242,8 +250,13 @@ class _Simulation:
 
     # ---------------------------------------------------------------- drive
 
+    def run_shift_start(self):
+        yield self.env.timeout(self.scenario.facility.shift.shift_start_minute)
+        self.assign()
+
     def run(self) -> RunResult:
         self.env.process(self.run_arrivals())
+        self.env.process(self.run_shift_start())
         if self.scenario.replenishments:
             self.env.process(self.run_replenishments())
         self.env.run()

@@ -107,3 +107,27 @@ def test_bootstrap_interval_is_reproducible():
     second = compare(scenario, baseline_runs, candidate, candidate_runs)
     assert [m.ci_low for m in first.metrics] == [m.ci_low for m in second.metrics]
     assert [m.ci_high for m in first.metrics] == [m.ci_high for m in second.metrics]
+
+
+def test_one_pair_cannot_claim_an_improvement():
+    baseline = demo_scenario(order_count=120)
+    candidate = fork(baseline, "one", "EDF", PolicyVersion(priority_strategy="edf"))
+    report = compare(
+        baseline,
+        simulate_replications(baseline, [1]),
+        candidate,
+        simulate_replications(candidate, [1]),
+    )
+    assert all(metric.verdict == "inconclusive" for metric in report.metrics)
+
+
+def test_different_workloads_cannot_be_a_paired_policy_comparison():
+    baseline = demo_scenario(order_count=60)
+    candidate = demo_scenario(order_count=61)
+    with pytest.raises(ValueError, match="workload"):
+        compare(
+            baseline,
+            simulate_replications(baseline, [1]),
+            candidate,
+            simulate_replications(candidate, [1]),
+        )

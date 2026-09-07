@@ -133,10 +133,52 @@ def compare(
     bootstrap_seed: int = 7,
 ) -> ComparisonReport:
     """Compare two sets of replications that share a seed set."""
-    baseline_by_seed = {run.seed: run for run in baseline_runs}
-    candidate_by_seed = {run.seed: run for run in candidate_runs}
-    seeds = sorted(set(baseline_by_seed) & set(candidate_by_seed))
+    if (
+        any(
+            run.engine_version != baseline_runs[0].engine_version
+            for run in baseline_runs + candidate_runs
+        )
+        if baseline_runs
+        else False
+    ):
+        raise ValueError("cannot compare replications from different engine versions")
+    return compare_metrics(
+        baseline_scenario,
+        [run_metrics(baseline_scenario, run) for run in baseline_runs],
+        candidate_scenario,
+        [run_metrics(candidate_scenario, run) for run in candidate_runs],
+        baseline_runs[0].engine_version if baseline_runs else "",
+        confidence,
+        bootstrap_samples,
+        bootstrap_seed,
+    )
 
+
+def compare_metrics(
+    baseline_scenario: Scenario,
+    baseline_metrics: list[RunMetrics],
+    candidate_scenario: Scenario,
+    candidate_metrics: list[RunMetrics],
+    engine_version: str,
+    confidence: float = 0.95,
+    bootstrap_samples: int = 2000,
+    bootstrap_seed: int = 7,
+) -> ComparisonReport:
+    """Assemble the report from immutable checkpoints, without re-simulation."""
+    if not 0 < confidence < 1 or bootstrap_samples < 1:
+        raise ValueError("confidence must be between zero and one; samples must be positive")
+    exclude = {"scenario_id", "label", "policy"}
+    if baseline_scenario.model_dump(exclude=exclude) != candidate_scenario.model_dump(
+        exclude=exclude
+    ):
+        raise ValueError("paired policy comparisons require the same workload and facility")
+    baseline_by_seed = {m.seed: m for m in baseline_metrics}
+    candidate_by_seed = {m.seed: m for m in candidate_metrics}
+    if len(baseline_by_seed) != len(baseline_metrics) or len(candidate_by_seed) != len(
+        candidate_metrics
+    ):
+        raise ValueError("duplicate seeds cannot be paired")
+    seeds = sorted(set(baseline_by_seed) & set(candidate_by_seed))
     notes: list[str] = []
     if not seeds:
         raise ValueError("baseline and candidate share no seeds, so no paired comparison exists")
@@ -145,14 +187,25 @@ def compare(
         notes.append(f"{len(dropped)} unpaired replications were excluded: seeds {sorted(dropped)}")
     if len(seeds) < 30:
         notes.append(
-            f"{len(seeds)} paired replications is below the 30 replication guidance, "
-            "so intervals are wide and the comparison should be treated as exploratory"
+            f"{len(seeds)} paired replications is below the 30 replication guidance; "
+            "uncertainty is poorly estimated and this comparison is exploratory"
         )
     if baseline_scenario.input_digest() == candidate_scenario.input_digest():
         notes.append("baseline and candidate have identical inputs, so no difference is expected")
-
-    baseline_metrics = [run_metrics(baseline_scenario, baseline_by_seed[s]) for s in seeds]
-    candidate_metrics = [run_metrics(candidate_scenario, candidate_by_seed[s]) for s in seeds]
+    baseline_metrics = [baseline_by_seed[s] for s in seeds]
+    candidate_metrics = [candidate_by_seed[s] for s in seeds]
+    if any(
+        b.dispatched_count != c.dispatched_count
+        for b, c in zip(baseline_metrics, candidate_metrics, strict=True)
+    ):
+        notes.append(
+            "Different numbers of orders were dispatched. Cycle time covers dispatched "
+            "orders only; a faster average can hide orders left behind. Read throughput first."
+        )
+    notes.append(
+        "Intervals describe seed variability for this fixed workload, not uncertainty "
+        "about a real warehouse or a different day."
+    )
 
     comparisons: list[MetricComparison] = []
     for metric, direction in METRIC_DIRECTIONS.items():
@@ -172,7 +225,7 @@ def compare(
                 mean_difference=round(sum(differences) / len(differences), 4),
                 ci_low=round(ci_low, 4),
                 ci_high=round(ci_high, 4),
-                verdict=_verdict(direction, ci_low, ci_high),
+                verdict=_verdict(direction, ci_low, ci_high) if len(seeds) > 1 else "inconclusive",
             )
         )
 
@@ -186,7 +239,7 @@ def compare(
         confidence=confidence,
         bootstrap_samples=bootstrap_samples,
         bootstrap_seed=bootstrap_seed,
-        engine_version=baseline_runs[0].engine_version,
+        engine_version=engine_version,
         metrics=comparisons,
         baseline_metrics=baseline_metrics,
         candidate_metrics=candidate_metrics,

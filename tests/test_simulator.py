@@ -174,3 +174,21 @@ def test_forking_preserves_workload():
     candidate = fork(scenario, "c", "Candidate", PolicyVersion(priority_strategy="edf"))
     assert [o.model_dump() for o in candidate.orders] == [o.model_dump() for o in scenario.orders]
     assert candidate.policy.digest() != scenario.policy.digest()
+
+
+def test_stock_is_reserved_before_another_picker_is_assigned():
+    scenario = hand_solvable_scenario()
+    scenario.facility.pickers = 10
+    scenario.inventory[0].on_hand = scenario.orders[0].quantity
+    run = simulate(scenario, seed=1)
+    assert check_run(scenario, run) == []
+    assert sum(e.event_type == EventType.pick_start for e in run.events) == 1
+
+
+def test_work_waits_for_shift_start():
+    scenario = hand_solvable_scenario()
+    scenario.facility.shift.shift_start_minute = 60
+    run = simulate(scenario, seed=1)
+    starts = [e.minute for e in run.events if e.event_type == EventType.pick_start]
+    assert min(starts) == 60
+    assert check_run(scenario, run) == []

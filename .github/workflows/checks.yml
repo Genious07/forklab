@@ -61,10 +61,13 @@ jobs:
           node-version: "20"
 
       - name: Install
-        run: npm install
+        run: npm ci
 
       - name: Typecheck
         run: npm run typecheck
+
+      - name: Regression tests
+        run: npm test
 
       - name: Build
         run: npm run build

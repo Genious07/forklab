@@ -11,13 +11,19 @@ interface Props {
    are carried over unchanged so a paired comparison isolates the policy. */
 export function ForkForm({ baseline, onFork, busy }: Props) {
   const [strategy, setStrategy] = useState<Policy["priority_strategy"]>("edf");
+  const [threshold, setThreshold] = useState(
+    baseline.policy.batching_threshold,
+  );
   const [cutoff, setCutoff] = useState(baseline.policy.dispatch_cutoff_minute);
-  const [overtime, setOvertime] = useState(baseline.policy.allowed_overtime_minutes);
+  const [overtime, setOvertime] = useState(
+    baseline.policy.allowed_overtime_minutes,
+  );
   const [ties, setTies] = useState<Policy["tie_breaking_rule"]>(
     baseline.policy.tie_breaking_rule,
   );
 
   const unchanged =
+    threshold === baseline.policy.batching_threshold &&
     strategy === baseline.policy.priority_strategy &&
     cutoff === baseline.policy.dispatch_cutoff_minute &&
     overtime === baseline.policy.allowed_overtime_minutes &&
@@ -32,6 +38,7 @@ export function ForkForm({ baseline, onFork, busy }: Props) {
         event.preventDefault();
         void onFork(label, {
           name: "candidate",
+          batching_threshold: threshold,
           priority_strategy: strategy,
           dispatch_cutoff_minute: cutoff,
           allowed_overtime_minutes: overtime,
@@ -41,8 +48,8 @@ export function ForkForm({ baseline, onFork, busy }: Props) {
     >
       <h2>Fork a scenario</h2>
       <p className="footnote">
-        This changes the decision, not the workload. The same orders, inventory, and
-        process model carry over so the comparison isolates the policy.
+        This changes the decision, not the workload. The same orders, inventory,
+        and process model carry over so the comparison isolates the policy.
       </p>
 
       <div className="field">
@@ -50,7 +57,9 @@ export function ForkForm({ baseline, onFork, busy }: Props) {
         <select
           id="strategy"
           value={strategy}
-          onChange={(e) => setStrategy(e.target.value as Policy["priority_strategy"])}
+          onChange={(e) =>
+            setStrategy(e.target.value as Policy["priority_strategy"])
+          }
         >
           <option value="fifo">First in first out</option>
           <option value="edf">Earliest deadline first</option>
@@ -58,6 +67,18 @@ export function ForkForm({ baseline, onFork, busy }: Props) {
         </select>
       </div>
 
+      {strategy === "batch_by_sku" && (
+        <label className="field">
+          Batch threshold
+          <input
+            type="number"
+            min={1}
+            max={100}
+            value={threshold}
+            onChange={(e) => setThreshold(Number(e.target.value))}
+          />
+        </label>
+      )}
       <div className="field">
         <label htmlFor="cutoff">Dispatch cutoff, minutes from day start</label>
         <input
@@ -69,7 +90,9 @@ export function ForkForm({ baseline, onFork, busy }: Props) {
           value={cutoff}
           onChange={(e) => setCutoff(Number(e.target.value))}
         />
-        <span className="hint">Baseline is {baseline.policy.dispatch_cutoff_minute}.</span>
+        <span className="hint">
+          Baseline is {baseline.policy.dispatch_cutoff_minute}.
+        </span>
       </div>
 
       <div className="field">
@@ -90,7 +113,9 @@ export function ForkForm({ baseline, onFork, busy }: Props) {
         <select
           id="ties"
           value={ties}
-          onChange={(e) => setTies(e.target.value as Policy["tie_breaking_rule"])}
+          onChange={(e) =>
+            setTies(e.target.value as Policy["tie_breaking_rule"])
+          }
         >
           <option value="order_id">Order id</option>
           <option value="smallest_quantity">Smallest quantity</option>
@@ -98,7 +123,11 @@ export function ForkForm({ baseline, onFork, busy }: Props) {
         </select>
       </div>
 
-      <button className="btn primary" type="submit" disabled={busy || unchanged}>
+      <button
+        className="btn primary"
+        type="submit"
+        disabled={busy || unchanged}
+      >
         Fork scenario
       </button>
       {unchanged && (

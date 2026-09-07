@@ -18,6 +18,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -57,6 +58,7 @@ class ExperimentRow(Base):
     """A durable job. `lease_expires_at` is what makes recovery possible."""
 
     __tablename__ = "experiments"
+    __table_args__ = (Index("uq_org_request", "organization_id", "idempotency_key", unique=True),)
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     organization_id: Mapped[str] = mapped_column(String(64), index=True)
@@ -88,6 +90,7 @@ class ReplicationRow(Base):
     """One replication checkpoint. Written as the worker progresses."""
 
     __tablename__ = "replications"
+    __table_args__ = (Index("uq_replication_work", "experiment_id", "arm", "seed", unique=True),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     experiment_id: Mapped[str] = mapped_column(ForeignKey("experiments.id"), index=True)
@@ -103,6 +106,7 @@ class EventLogRow(Base):
     """The event log of a single stored replication, kept for order inspection."""
 
     __tablename__ = "event_logs"
+    __table_args__ = (Index("uq_event_log_work", "experiment_id", "arm", "seed", unique=True),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     experiment_id: Mapped[str] = mapped_column(ForeignKey("experiments.id"), index=True)
@@ -126,7 +130,12 @@ def get_engine():
 
 
 def init_db() -> None:
-    Base.metadata.create_all(get_engine())
+    engine = get_engine()
+    Base.metadata.create_all(engine)
+    # Additive upgrade for existing databases. Duplicate legacy work fails closed.
+    for table in Base.metadata.sorted_tables:
+        for index in table.indexes:
+            index.create(engine, checkfirst=True)
 
 
 @contextmanager

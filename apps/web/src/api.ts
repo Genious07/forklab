@@ -68,7 +68,7 @@ export interface Experiment {
   attempts: number;
   error: string | null;
   cancel_requested: boolean;
-  report: ComparisonReport | null;
+  report: ComparisonReport | { single_arm: true; replications: number } | null;
 }
 
 export interface OrderOutcome {
@@ -83,6 +83,7 @@ export interface OrderOutcome {
   dispatched_minute: number | null;
   terminal: string;
   blocked_on_stock: boolean;
+  blocked_minutes: number[];
   is_late: boolean;
   wait_minutes: number | null;
   cycle_minutes: number | null;
@@ -106,7 +107,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     let detail = `${response.status} ${response.statusText}`;
     try {
       const body = await response.json();
-      if (body?.detail) detail = String(body.detail);
+      if (body?.detail)
+        detail =
+          typeof body.detail === "string"
+            ? body.detail
+            : JSON.stringify(body.detail);
     } catch {
       /* keep the status line */
     }
@@ -119,7 +124,9 @@ export const api = {
   health: () => request<{ status: string; engine_version: string }>("/health"),
   scenarios: () => request<ScenarioSummary[]>("/scenarios"),
   resetDemo: (orders: number) =>
-    request<ScenarioSummary>(`/scenarios/demo?orders=${orders}`, { method: "POST" }),
+    request<ScenarioSummary>(`/scenarios/demo?orders=${orders}`, {
+      method: "POST",
+    }),
   fork: (parentId: string, label: string, policy: Partial<Policy>) =>
     request<ScenarioSummary>(`/scenarios/${parentId}/fork`, {
       method: "POST",
@@ -141,15 +148,29 @@ export const api = {
   experiment: (id: string) => request<Experiment>(`/experiments/${id}`),
   cancel: (id: string) =>
     request<Experiment>(`/experiments/${id}/cancel`, { method: "POST" }),
-  orders: (id: string, arm: "baseline" | "candidate", onlyLate: boolean) =>
-    request<OrderOutcome[]>(
-      `/experiments/${id}/orders?arm=${arm}&only_late=${onlyLate}&limit=500`,
-    ),
+  orders: async (
+    id: string,
+    arm: "baseline" | "candidate",
+    onlyLate: boolean,
+  ) => {
+    const all: OrderOutcome[] = [];
+    for (let offset = 0; ; offset += 1000) {
+      const rows = await request<OrderOutcome[]>(
+        `/experiments/${encodeURIComponent(id)}/orders?arm=${arm}&only_late=${onlyLate}&limit=1000&offset=${offset}`,
+      );
+      all.push(...rows);
+      if (rows.length < 1000) return all;
+    }
+  },
   orderTimeline: (id: string, orderId: string, arm: "baseline" | "candidate") =>
-    request<{ order_id: string; arm: string; seed: number; events: OrderEvent[] }>(
-      `/experiments/${id}/orders/${orderId}?arm=${arm}`,
-    ),
-  manifest: (id: string) => request<Record<string, unknown>>(`/experiments/${id}/manifest`),
+    request<{
+      order_id: string;
+      arm: string;
+      seed: number;
+      events: OrderEvent[];
+    }>(`/experiments/${id}/orders/${encodeURIComponent(orderId)}?arm=${arm}`),
+  manifest: (id: string) =>
+    request<Record<string, unknown>>(`/experiments/${id}/manifest`),
 };
 
 /** Minute 0 is the start of the facility day, taken here as 08:00 local time. */
@@ -157,7 +178,7 @@ export function clock(minute: number, dayStartMinutes = 8 * 60): string {
   const total = Math.max(0, Math.round(dayStartMinutes + minute));
   const hh = Math.floor(total / 60) % 24;
   const mm = total % 60;
-  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+  return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}${total >= 1440 ? ` (+${Math.floor(total / 1440)}d)` : ""}`;
 }
 
 export function signed(value: number, digits = 4): string {

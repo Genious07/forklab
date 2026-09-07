@@ -88,8 +88,8 @@ export function AssumptionsPanel({ scenario, baseline }: Props) {
       />
 
       <p className="footnote" style={{ marginTop: 16 }}>
-        Workload {scenario.orders} orders across {scenario.skus} SKUs. Input digest{" "}
-        {scenario.input_digest}, policy digest {scenario.policy_digest}.
+        Workload {scenario.orders} orders across {scenario.skus} SKUs. Input
+        digest {scenario.input_digest}, policy digest {scenario.policy_digest}.
       </p>
     </div>
   );

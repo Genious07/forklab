@@ -239,3 +239,89 @@ def test_unknown_scenario_is_rejected_when_creating_an_experiment(client):
         "/api/experiments", json={"baseline_scenario_id": "does-not-exist", "replications": 1}
     )
     assert response.status_code == 404
+
+
+def test_demo_reset_preserves_existing_snapshot(client):
+    before = client.get("/api/scenarios/demo-baseline").json()
+    fresh = client.post("/api/scenarios/demo?orders=75").json()
+    assert fresh["id"] != before["id"]
+    assert client.get("/api/scenarios/demo-baseline").json() == before
+
+
+def test_order_pagination_covers_every_order(client):
+    job = client.post(
+        "/api/experiments",
+        json={
+            "baseline_scenario_id": "demo-baseline",
+            "replications": 1,
+        },
+    ).json()
+    assert wait_for(client, job["id"])["state"] == "succeeded"
+    rows = []
+    for offset in range(0, 750, 250):
+        rows.extend(
+            client.get(f"/api/experiments/{job['id']}/orders?limit=250&offset={offset}").json()
+        )
+    assert len(rows) == 650
+    assert len({r["order_id"] for r in rows}) == 650
+    assert all("blocked_minutes" in row for row in rows)
+
+
+def test_idempotency_key_cannot_refer_to_different_request(client):
+    body = {
+        "baseline_scenario_id": "demo-baseline",
+        "replications": 1,
+        "idempotency_key": "same-key-different-input",
+    }
+    assert client.post("/api/experiments", json=body).status_code == 200
+    body["replications"] = 2
+    assert client.post("/api/experiments", json=body).status_code == 409
+
+
+def test_imported_dataset_runs_with_estimated_facility_settings(client):
+    response = client.post(
+        "/api/imports",
+        files={
+            "orders_file": ("orders.csv", "order_id,sku,quantity,arrival,deadline\nA,X,1,0,60\n"),
+            "inventory_file": ("inventory.csv", "sku,on_hand\nX,10\n"),
+        },
+    )
+    assert response.status_code == 200
+    scenario_id = response.json()["scenario_id"]
+    assert scenario_id
+    scenario = client.get(f"/api/scenarios/{scenario_id}").json()
+    assert set(scenario["facility"]["provenance"].values()) == {"estimated"}
+    job = client.post(
+        "/api/experiments",
+        json={
+            "baseline_scenario_id": scenario_id,
+            "replications": 1,
+        },
+    ).json()
+    assert wait_for(client, job["id"])["state"] == "succeeded"
+
+
+def test_duplicate_import_returns_validation_error_not_server_error(client):
+    response = client.post(
+        "/api/imports",
+        files={
+            "orders_file": (
+                "orders.csv",
+                "order_id,sku,quantity,arrival,deadline\nA,X,1,0,60\nA,X,1,0,60\n",
+            ),
+            "inventory_file": ("inventory.csv", "sku,on_hand\nX,10\n"),
+        },
+    )
+    assert response.status_code == 422
+    assert "unique" in response.json()["detail"]
+
+
+def test_oversized_upload_is_rejected(client):
+    response = client.post(
+        "/api/imports",
+        files={
+            "orders_file": ("orders.csv", b"x" * (2 * 1024 * 1024 + 1)),
+            "inventory_file": ("inventory.csv", "sku,on_hand\nX,10\n"),
+        },
+    )
+    assert response.status_code == 413

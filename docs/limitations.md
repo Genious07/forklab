@@ -65,8 +65,9 @@ so this replacement is small.
 
 Uploaded CSV files are parsed with the standard library reader into validated
 Pydantic models. There is no archive extraction and no code execution path from
-uploaded data. There are no request size limits configured, so a self hosted
-deployment should set them at the reverse proxy.
+uploaded data. The API limits each file to 2 MiB and each import to 5,000 orders.
+Set total request limits, rate limits and concurrency quotas at the reverse proxy.
+Multipart parsing occurs before the per-file application check.
 
 ## Determinism boundaries
 
@@ -85,3 +86,21 @@ values reproduce exactly rather than approximately. The replay check uses a
 - A workload model that samples days rather than replaying one fixed day
 - Modelling partial fulfillment, which is common and currently absent
 - A travel model, which would change the relative cost of batching strategies
+
+
+## Audit follow-ups (September 2026)
+
+This is a deployable internal prototype, not a complete public multi-tenant service.
+The blueprint's identity/roles, calibration workflow, policy proposer, workload-day
+uncertainty and migration framework still need implementation.
+
+CSV timestamps use a fixed 08:00 display origin. The legacy ISO parser discards the
+date and offset, so use numeric minute offsets for imports until a date-aware
+facility import contract is implemented. Mixed dates and time zones are not supported.
+
+Wait statistics include orders that started picking; cycle statistics include only
+orders that dispatched. Empty samples currently produce zero values. Interpret
+these with throughput and unfulfilled counts, never as standalone efficiency wins.
+
+A recorded stock shortage in the process view is historical evidence before picking,
+not proof of the exact stock balance at the current scrub time. The map is schematic.

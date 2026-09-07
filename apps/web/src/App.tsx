@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Experiment, OrderOutcome, Policy, ScenarioSummary } from "./api";
 import { api, clock } from "./api";
+import { ImportForm } from "./components/ImportForm";
 import { AssumptionsPanel } from "./components/AssumptionsPanel";
 import { ComparisonTable } from "./components/ComparisonTable";
 import { ForkForm } from "./components/ForkForm";
@@ -23,7 +24,8 @@ interface Watching {
 function readWatching(): Watching | null {
   try {
     const raw = window.localStorage.getItem(WATCHING_KEY);
-    return raw ? (JSON.parse(raw) as Watching) : null;
+    const value = raw ? JSON.parse(raw) : null;
+    return value && typeof value.experimentId === "string" ? value : null;
   } catch {
     return null;
   }
@@ -42,6 +44,7 @@ type Lane = "baseline" | "candidate";
 
 export default function App() {
   const [scenarios, setScenarios] = useState<ScenarioSummary[]>([]);
+  const [baselineId, setBaselineId] = useState("demo-baseline");
   const [candidateId, setCandidateId] = useState<string | null>(null);
   const [activeLane, setActiveLane] = useState<Lane>("baseline");
   const [experiment, setExperiment] = useState<Experiment | null>(null);
@@ -52,12 +55,10 @@ export default function App() {
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const streamRef = useRef<EventSource | null>(null);
-  const watchRef = useRef<((id: string, hasCandidate: boolean) => void) | null>(null);
 
   const baseline = useMemo(
-    () => scenarios.find((s) => s.id === "demo-baseline") ?? scenarios[0] ?? null,
-    [scenarios],
+    () => scenarios.find((s) => s.id === baselineId) ?? scenarios[0] ?? null,
+    [scenarios, baselineId],
   );
   const candidate = useMemo(
     () => scenarios.find((s) => s.id === candidateId) ?? null,
@@ -76,16 +77,27 @@ export default function App() {
 
   useEffect(() => {
     void refreshScenarios();
-    return () => streamRef.current?.close();
   }, [refreshScenarios]);
 
-  /* Load the per order outcomes that the process map reads. */
-  const loadOrders = useCallback(async (experimentId: string, hasCandidate: boolean) => {
-    const next: Record<Lane, OrderOutcome[]> = { baseline: [], candidate: [] };
-    next.baseline = await api.orders(experimentId, "baseline", false);
-    if (hasCandidate) next.candidate = await api.orders(experimentId, "candidate", false);
-    setOrders(next);
-  }, []);
+  useEffect(() => {
+    if (experiment?.state !== "succeeded") return;
+    let cancelled = false;
+    void Promise.all([
+      api.orders(experiment.id, "baseline", false),
+      experiment.candidate_scenario_id
+        ? api.orders(experiment.id, "candidate", false)
+        : Promise.resolve([]),
+    ])
+      .then(([baseline, candidate]) => {
+        if (!cancelled) setOrders({ baseline, candidate });
+      })
+      .catch((err: Error) => {
+        if (!cancelled) setError(err.message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [experiment?.id, experiment?.state]);
 
   /* Reattach to whatever this tab was last watching. */
   useEffect(() => {
@@ -97,54 +109,52 @@ export default function App() {
       .then((body) => {
         if (cancelled) return;
         setExperiment(body);
-        setCandidateId(saved.candidateId);
+        setBaselineId(body.baseline_scenario_id);
+        setCandidateId(body.candidate_scenario_id);
         if (saved.candidateId) setActiveLane("candidate");
         if (body.state === "succeeded") {
-          void loadOrders(body.id, Boolean(body.candidate_scenario_id));
+          setBusy(false);
         } else if (["queued", "running"].includes(body.state)) {
           setBusy(true);
-          watchRef.current?.(body.id, Boolean(body.candidate_scenario_id));
         }
       })
       .catch(() => writeWatching(null));
     return () => {
       cancelled = true;
     };
-  }, [loadOrders]);
-
-  const watch = useCallback(
-    (experimentId: string, hasCandidate: boolean) => {
-      streamRef.current?.close();
-      const source = new EventSource(`/api/experiments/${experimentId}/stream`);
-      streamRef.current = source;
-      source.onmessage = (message) => {
-        const body = JSON.parse(message.data) as Experiment;
-        setExperiment(body);
-        if (["succeeded", "failed", "cancelled"].includes(body.state)) {
-          source.close();
-          setBusy(false);
-          if (body.state === "succeeded") void loadOrders(experimentId, hasCandidate);
-        }
-      };
-      source.onerror = () => {
-        /* Recover by polling from the persisted record rather than losing the run. */
-        source.close();
-        void api
-          .experiment(experimentId)
-          .then((body) => {
-            setExperiment(body);
-            if (body.state === "succeeded") void loadOrders(experimentId, hasCandidate);
-            setBusy(!["succeeded", "failed", "cancelled"].includes(body.state));
-          })
-          .catch((err: Error) => setError(err.message));
-      };
-    },
-    [loadOrders],
-  );
+  }, []);
 
   useEffect(() => {
-    watchRef.current = watch;
-  }, [watch]);
+    if (!experiment || !["queued", "running"].includes(experiment.state))
+      return;
+    let cancelled = false;
+    let pending = false;
+    const id = experiment.id;
+    const poll = async () => {
+      if (pending) return;
+      pending = true;
+      try {
+        const body = await api.experiment(id);
+        if (cancelled) return;
+        setExperiment(body);
+        if (!["queued", "running"].includes(body.state)) {
+          setBusy(false);
+        }
+      } catch (err) {
+        if (!cancelled) setError((err as Error).message);
+      } finally {
+        pending = false;
+      }
+    };
+    const timer = window.setInterval(() => {
+      void poll();
+    }, 1500);
+    void poll();
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [experiment?.id, experiment?.state]);
 
   const handleFork = async (label: string, policy: Partial<Policy>) => {
     if (!baseline) return;
@@ -170,10 +180,14 @@ export default function App() {
     setBusy(true);
     setError(null);
     try {
-      const created = await api.createExperiment(baseline.id, candidateId, REPLICATIONS);
+      const created = await api.createExperiment(
+        baseline.id,
+        candidateId,
+        REPLICATIONS,
+      );
       setExperiment(created);
       writeWatching({ experimentId: created.id, candidateId });
-      watch(created.id, Boolean(candidateId));
+      setOrders({ baseline: [], candidate: [] });
     } catch (err) {
       setError((err as Error).message);
       setBusy(false);
@@ -207,16 +221,39 @@ export default function App() {
     }
   };
 
-  const report = experiment?.state === "succeeded" ? experiment.report : null;
-  const stale = Boolean(experiment && candidate && experiment.candidate_scenario_id !== candidate.id);
+  const completedReport =
+    experiment?.state === "succeeded" ? experiment.report : null;
+  const report =
+    completedReport && "metrics" in completedReport ? completedReport : null;
+  const stale = Boolean(
+    experiment &&
+      candidate &&
+      experiment.candidate_scenario_id !== candidate.id,
+  );
   const shiftEnd = baseline?.facility.shift.shift_end_minute ?? 540;
-  const maxMinute = Math.round(shiftEnd + 120);
+  const maxMinute = Math.ceil(
+    Math.max(
+      shiftEnd +
+        Math.max(
+          baseline?.policy.allowed_overtime_minutes ?? 0,
+          candidate?.policy.allowed_overtime_minutes ?? 0,
+        ),
+      ...Object.values(orders)
+        .flat()
+        .flatMap((o) => [
+          o.arrival_minute,
+          o.pick_end_minute ?? 0,
+          o.pack_end_minute ?? 0,
+          o.dispatched_minute ?? 0,
+        ]),
+    ),
+  );
 
   if (!baseline) {
     return (
       <div className="app">
         <p className="banner warning">
-          {error ?? "Loading the sample warehouse. Start the API with `make dev`."}
+          {error ?? "Loading warehouse studies."}
         </p>
       </div>
     );
@@ -224,10 +261,17 @@ export default function App() {
 
   return (
     <>
-      <a className="skip-link" href="#comparison">Skip to the comparison table</a>
+      <a className="skip-link" href="#comparison">
+        Skip to the comparison table
+      </a>
       <div className="app">
         <header className="masthead">
-          <h1>ForkLab</h1>
+          <div className="brand">
+            <img src="/brand/forklab-mark.svg" alt="" width="42" height="42" />
+            <h1>
+              ForkLab<span>Decision workbench</span>
+            </h1>
+          </div>
           <span className="context">
             {baseline.facility.facility_id.replace(/-/g, " ")} / dispatch study
           </span>
@@ -243,15 +287,85 @@ export default function App() {
         </header>
 
         {!report && (
-          <p id="export-reason" className="btn-reason" style={{ marginTop: -16 }}>
+          <p
+            id="export-reason"
+            className="btn-reason"
+            style={{ marginTop: -16 }}
+          >
             Export becomes available once a two lane comparison has completed.
           </p>
         )}
 
+        <section className="study-heading">
+          <div>
+            <p className="eyebrow">Warehouse policy lab</p>
+            <h2>
+              One warehouse.
+              <br />
+              Two possible days.
+            </h2>
+            <p>
+              Change a dispatch decision. Trace its consequences.
+              <br />
+              Keep the evidence that lets you choose.
+            </p>
+          </div>
+          <dl className="study-facts">
+            <div>
+              <dt>Orders in this study</dt>
+              <dd>{baseline.orders.toLocaleString()}</dd>
+            </div>
+            <div>
+              <dt>Inventory lines</dt>
+              <dd>{baseline.skus}</dd>
+            </div>
+            <div>
+              <dt>Paired seeds</dt>
+              <dd>{REPLICATIONS}</dd>
+            </div>
+          </dl>
+        </section>
+        <label className="dataset-picker">
+          Study dataset{" "}
+          <select
+            disabled={busy}
+            value={baseline.id}
+            onChange={(e) => {
+              setBaselineId(e.target.value);
+              setCandidateId(null);
+              setExperiment(null);
+              setOrders({ baseline: [], candidate: [] });
+              setActiveLane("baseline");
+              writeWatching(null);
+            }}
+          >
+            {scenarios
+              .filter((s) => !s.parent_id)
+              .map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.label}
+                </option>
+              ))}
+          </select>
+        </label>
+        <ImportForm
+          disabled={busy}
+          onImported={async (id) => {
+            await refreshScenarios();
+            setBaselineId(id);
+            setCandidateId(null);
+            setActiveLane("baseline");
+            setExperiment(null);
+            setOrders({ baseline: [], candidate: [] });
+            writeWatching(null);
+          }}
+        />
         <p className="banner">
-          Demonstration data. This synthetic warehouse describes no real facility,
-          customer, or supplier. Simulated differences are evidence about the model,
-          not a guarantee about a site.
+          {baseline.id.startsWith("demo")
+            ? "Demonstration data."
+            : "Imported data with estimated facility settings."}{" "}
+          Simulated differences are evidence about the model, not a guarantee
+          about a site.
         </p>
 
         {error && <p className="banner warning">{error}</p>}
@@ -283,8 +397,8 @@ export default function App() {
 
         {stale && (
           <p className="banner warning">
-            The candidate changed after this result was produced. Run the comparison
-            again before reading the numbers.
+            The candidate changed after this result was produced. Run the
+            comparison again before reading the numbers.
           </p>
         )}
 
@@ -300,26 +414,48 @@ export default function App() {
             </div>
             <span>
               {experiment.completed_replications} of{" "}
-              {experiment.replications * (experiment.candidate_scenario_id ? 2 : 1)} replications
+              {experiment.replications *
+                (experiment.candidate_scenario_id ? 2 : 1)}{" "}
+              replications
             </span>
             {experiment.attempts > 1 && (
-              <span className="footnote">attempt {experiment.attempts}, resumed</span>
+              <span className="footnote">
+                attempt {experiment.attempts}, resumed
+              </span>
             )}
             {["queued", "running"].includes(experiment.state) && (
-              <button className="btn" onClick={handleCancel}>Stop</button>
+              <button className="btn" onClick={handleCancel}>
+                Stop
+              </button>
             )}
-            {experiment.error && <span className="verdict regression">{experiment.error}</span>}
+            {experiment.error && (
+              <span className="verdict regression">{experiment.error}</span>
+            )}
           </div>
         )}
 
         <div className="workspace">
           <div className="panel">
-            <h2>Process at {clock(minute)}</h2>
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">01 / Follow the flow</p>
+                <h2>Warehouse at {clock(minute)}</h2>
+              </div>
+              <span className="footnote">
+                Stored seed 1 • {orders.baseline.length} orders loaded
+              </span>
+            </div>
             {orders.baseline.length === 0 ? (
-              <p className="empty">
-                Run the baseline to populate the process map. Counts come from a stored
-                replication, not from a live animation.
-              </p>
+              <div className="process-preview">
+                <img
+                  src="/brand/warehouse-flow.svg"
+                  alt="Orders pass through receiving, picking, packing and dispatch."
+                />
+                <p className="empty">
+                  Run the baseline to populate the process map. Counts come from
+                  a stored replication, not from a live animation.
+                </p>
+              </div>
             ) : (
               <>
                 <ProcessMap
@@ -344,11 +480,19 @@ export default function App() {
             )}
           </div>
 
-          {candidate && activeLane === "candidate" ? (
-            <AssumptionsPanel scenario={candidate} baseline={baseline} />
-          ) : (
-            <AssumptionsPanel scenario={active ?? baseline} baseline={null} />
-          )}
+          <aside>
+            <ForkForm
+              key={baseline.id}
+              baseline={baseline}
+              onFork={handleFork}
+              busy={busy}
+            />
+            {candidate && activeLane === "candidate" ? (
+              <AssumptionsPanel scenario={candidate} baseline={baseline} />
+            ) : (
+              <AssumptionsPanel scenario={active ?? baseline} baseline={null} />
+            )}
+          </aside>
         </div>
 
         <TimeScrubber
@@ -360,22 +504,33 @@ export default function App() {
         />
 
         <section id="comparison" className="panel">
-          <h2>Comparison</h2>
+          <p className="eyebrow">02 / Weigh the evidence</p>
+          <h2>What changed, and how certain are we?</h2>
+          {completedReport && !report && (
+            <p className="banner">
+              Baseline complete. Inspect its process below, then fork a policy
+              to measure the difference.
+            </p>
+          )}
           <ComparisonTable report={report} />
         </section>
 
-        <div className="workspace">
+        <div>
           <OrderInspector
-            experimentId={report ? experiment!.id : null}
-            arm={activeLane === "candidate" && candidate ? "candidate" : "baseline"}
+            experimentId={
+              experiment?.state === "succeeded" ? experiment.id : null
+            }
+            arm={
+              activeLane === "candidate" && candidate ? "candidate" : "baseline"
+            }
           />
-          <ForkForm baseline={baseline} onFork={handleFork} busy={busy} />
         </div>
 
         <footer className="footnote">
-          Engine {experiment?.engine_version || "not run"}. The table is the numerical
-          authority; the map explains mechanics. Every reported number comes from a
-          stored replication that can be replayed with the exported manifest.
+          Engine {experiment?.engine_version || "not run"}. The table is the
+          numerical authority; the map explains mechanics. Every reported number
+          comes from a stored replication that can be replayed with the exported
+          manifest.
         </footer>
       </div>
     </>

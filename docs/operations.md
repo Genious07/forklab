@@ -97,7 +97,12 @@ database, so use it for liveness rather than readiness.
 
 ## Upgrades
 
-Tables are created with `create_all` at startup. There is no migration tool
+Tables are created with `create_all` at startup. The audit update also adds unique
+indexes for `(experiment_id, arm, seed)` on replications and event logs, and
+`(organization_id, idempotency_key)` on experiments. Back up before upgrading.
+Check for duplicate non-null keys with GROUP BY/HAVING COUNT(*) > 1 first. Existing
+duplicates cause startup to fail; startup never deletes or silently merges records.
+Resolve duplicates from a verified backup under operator review, then restart. There is no migration tool
 wired yet, which is fine while the schema is additive and unreleased, and is a
 gap before any deployment holding data worth keeping. Alembic is the intended
 answer and is listed in the blueprint.
@@ -105,3 +110,11 @@ answer and is listed in the blueprint.
 Changing the simulator changes `ENGINE_VERSION`, which changes results. Replay
 warns rather than failing silently. Keep the manifest alongside any decision
 you acted on.
+
+
+Worker writes and heartbeats are conditional on a live lease, running state and
+worker identity. A background renewal runs during long seeds; cancellation wins
+before a terminal success is recorded. Reports assemble from metric checkpoints.
+A retry under a different engine version fails rather than mixing versions.
+The web client polls durable experiment state every 1.5 seconds while active and
+reattaches after refresh. No browser connection owns job execution.

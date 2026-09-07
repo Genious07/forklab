@@ -10,7 +10,13 @@ interface Props {
 
 /* One scrubber drives both lanes, so baseline and candidate are always compared
    at the same simulated time. */
-export function TimeScrubber({ minute, max, onChange, disabled, cutoffMinute }: Props) {
+export function TimeScrubber({
+  minute,
+  max,
+  onChange,
+  disabled,
+  cutoffMinute,
+}: Props) {
   return (
     <div className="scrubber">
       <div className="head">
@@ -26,7 +32,7 @@ export function TimeScrubber({ minute, max, onChange, disabled, cutoffMinute }: 
         type="range"
         min={0}
         max={max}
-        step={5}
+        step={1}
         value={minute}
         disabled={disabled}
         onChange={(event) => onChange(Number(event.target.value))}

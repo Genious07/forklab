@@ -30,6 +30,11 @@ def check_run(scenario: Scenario, result: RunResult) -> list[str]:
                     f"{event.order_id}: pick_start {event.minute} precedes arrival {arrived_at}"
                 )
 
+    for event in result.events:
+        if event.event_type in (EventType.pick_start, EventType.pack_start):
+            if event.minute < scenario.facility.shift.shift_start_minute - 1e-9:
+                failures.append(f"{event.order_id}: work started before the shift")
+
     # 2. Capacity is never exceeded at either stage.
     for start, end, limit, label in (
         (EventType.pick_start, EventType.pick_end, scenario.facility.pickers, "pickers"),
