@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+apps/web/dist/
+
+# Local state
+*.db
+*.db-journal
+forklab.db
+.env
+.DS_Store
+
+# Local editor and tool config
+.claude/
