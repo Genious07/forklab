@@ -21,3 +21,6 @@ forklab.db
 
 # Local editor and tool config
 .claude/
+
+# TypeScript incremental build state
+*.tsbuildinfo
