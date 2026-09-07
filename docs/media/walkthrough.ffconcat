@@ -1,0 +1,12 @@
+ffconcat version 1.0
+file '01-workbench.png'
+duration 5
+file '02-fork-policy.png'
+duration 5
+file '03-process-map.png'
+duration 5
+file '04-comparison.png'
+duration 7
+file '05-order-trace.png'
+duration 7
+file '05-order-trace.png'

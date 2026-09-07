@@ -10,6 +10,19 @@ comparison that says "inconclusive" when the evidence does not support a claim.
 This is release one. It runs a single facility, on synthetic or imported CSV
 data, with no API key and no paid service.
 
+## See it in action
+
+![ForkLab screenshot tour: warehouse workbench, policy fork, process map, paired evidence and order trace](docs/media/forklab-walkthrough.gif)
+
+[Watch or download the MP4 tour](docs/media/forklab-walkthrough.mp4) ·
+[Open the comparison screenshot](docs/media/04-comparison.png) ·
+[Read the visual walkthrough](docs/walkthrough.md)
+
+The GIF and video are a paced tour of real application screenshots using the
+650-order synthetic demo. They are not a real-time recording or a claim about
+simulation speed. Static screenshots and the written guide below cover the same
+steps without animation.
+
 ---
 
 ## What the first run shows
@@ -84,24 +97,57 @@ order to see where it waited.
 
 ---
 
-## The main workflow
+## How to use the workbench
 
-1. **Open a sample warehouse.** A synthetic day is seeded on first start. The
-   demonstration banner says so.
-2. **Or import your own.** `orders.csv` and `inventory.csv`, with an optional
-   `replenishments.csv`. Times may be minutes from day start, `HH:MM`, or ISO
-   timestamps. See [fixtures/demo](fixtures/demo) for the exact shape.
-3. **Confirm the model.** Assumptions sit beside the result and are labelled
-   confirmed or estimated, never hidden in a settings screen.
-4. **Run the baseline.** A progress strip reports replications completed and
-   offers cancellation.
-5. **Fork a scenario.** Only the policy changes. The workload, inventory, and
-   process model carry over so the comparison isolates the decision.
-6. **Compare fairly.** Both arms run on the same seed set. Each metric carries
-   a direction, a signed difference, and a bootstrap interval.
-7. **Inspect a consequence.** Select a late order and read its event path.
-8. **Export a decision.** A manifest records inputs, policies, seeds, engine
-   version, and limitations, and `forklab replay` recomputes it.
+After `make install` and `make dev`, open <http://localhost:8000>.
+
+1. **Run the sample baseline.** Keep **North warehouse, synthetic day** selected
+   in **Study dataset**, then click **Run baseline**. Wait for `succeeded` and
+   **650 orders loaded**. This establishes the first-in-first-out reference.
+2. **Create a different policy.** In **Fork a scenario**, select **Earliest
+   deadline first**. Leave dispatch cutoff at **540** and overtime at **0** for
+   this first comparison. Click **Fork scenario**. An orange candidate tab appears.
+3. **Run both policies.** Click **Run comparison**. The progress strip reaches
+   **60 of 60 replications**: 30 baseline runs and 30 candidate runs on paired
+   seeds. **Stop** requests cancellation; refreshing the page restores the study.
+4. **Trace the process.** Drag **Shared time** to inspect both lanes at the same
+   point in the day. The map shows stored seed 1, while the comparison aggregates
+   all 30 pairs. Packed but undispatched orders are shown separately from sent orders.
+5. **Read the tradeoff.** Under **What changed, and how certain are we?**, the
+   demo reports about **5.15 percentage points fewer late orders**, but **6.52
+   minutes more P90 waiting**. Read the interval, verdict and full table together.
+   A positive difference means candidate minus baseline, not automatically better.
+6. **Explain one order.** Select the candidate tab, find **D0035** under
+   **Follow a single order**, then select its row. Its timeline shows a stock
+   shortage before picking. Switch lanes to investigate the corresponding baseline.
+7. **Keep a reproducible decision.** Click **Export decision** after the comparison
+   succeeds. Replay the downloaded JSON with the command below, using its actual filename.
+
+```bash
+uv run forklab replay ~/Downloads/forklab-decision-EXPERIMENT_ID.json
+```
+
+![Paired evidence shows fewer late orders alongside worse tail waiting](docs/media/04-comparison.png)
+
+### Use your own CSVs
+
+Expand **Use your warehouse CSVs**, choose the required orders and inventory files,
+optionally add replenishments, then click **Import dataset**. A successful import
+selects the new dataset. Fix reported errors before resubmitting.
+
+| File | Columns |
+| --- | --- |
+| `orders.csv` | `order_id,sku,quantity,arrival,deadline,service_class` |
+| `inventory.csv` | `sku,on_hand` |
+| `replenishments.csv` (optional) | `sku,quantity,arrival` |
+
+Use [the demo CSVs](fixtures/demo) as templates. Imports allow 5,000 orders and
+2 MiB per file. Use **numeric minutes from 08:00** for the current single-day
+model: `0` is 08:00 and `540` is 17:00. Although the legacy parser accepts clock
+and ISO strings, ISO dates and offsets are discarded; do not use it for mixed
+dates or time zones. Imported facility settings start as **estimated**. Inspect
+the assumptions before interpreting a result; the current UI does not calibrate
+the facility model from your files.
 
 ### An import never silently drops a row
 
@@ -133,9 +179,10 @@ Selecting order `D0035` in the workbench produces its event path:
 13:08  Dispatched                     deadline: 280.47, late: 1
 ```
 
-This order was not late because of queueing. It waited 82 minutes for stock
-that did not arrive until 13:02, then cleared the facility in 6 minutes. No
-dispatch policy would have saved it. That distinction is the product.
+This trace records a stock shortage at 11:40 and stock reservation at 13:02.
+Picking began about 82 minutes after arrival, then the order cleared the remaining
+process in about 6 minutes. The trace identifies where to investigate; it does
+not prove that every possible dispatch policy would have the same outcome.
 
 ---
 
@@ -170,7 +217,7 @@ supplied it.
 
 ```
 $ uv run pytest tests/
-54 passed
+68 passed
 ```
 
 ---
@@ -192,7 +239,7 @@ An exported manifest can be recomputed:
 
 ```
 $ uv run forklab replay decision.json
-  engine in manifest forklab-sim-0.1.0, running forklab-sim-0.1.0
+  engine in manifest forklab-sim-0.1.1, running forklab-sim-0.1.1
   30 paired replications
   every recorded metric reproduced exactly
 ```
@@ -227,8 +274,8 @@ Orders dispatched                 649.8000    578.4333     -71.3667    [-72.3000
 
 Cycle time "improved" only because 71 slow orders never got dispatched at all
 and therefore left the average. This is survivorship, not a gain. ForkLab shows
-both rows side by side rather than picking the flattering one, but it does not
-detect the trap for you. Read the throughput row with the timing rows.
+both rows side by side and warns when dispatched counts differ. Read the
+throughput row with the timing rows.
 
 ---
 
@@ -299,6 +346,7 @@ anyone who might act on it. The short version:
 
 ## Documentation
 
+- [docs/walkthrough.md](docs/walkthrough.md) screenshot tour and usage steps
 - [docs/architecture.md](docs/architecture.md) how the pieces fit
 - [docs/limitations.md](docs/limitations.md) what this does not establish
 - [docs/operations.md](docs/operations.md) deploy, back up, recover
