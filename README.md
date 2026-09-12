@@ -43,7 +43,7 @@ Baseline, first in first out:
 ```
 
 First in first out looks fine in aggregate and is quietly failing express
-orders. Forking to earliest deadline first, over 30 paired replications on the
+orders. Forking to earliest deadline first, over  30 paired replications on the
 same seed set:
 
 ```
